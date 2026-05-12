@@ -2,94 +2,71 @@
 #include <VL53L0X.h>
 #include <Adafruit_TCS34725.h>
 
-// ── Pin definitions ──────────────────────────────────────────
-#define SDA_PIN     8
-#define SCL_PIN     9
-#define RELAY_PIN   4
+// ── Wire (I2C0): ToF1 + ToF2 ─────────────────────────────────
+#define TOF_SDA     8
+#define TOF_SCL     9
+#define XSHUT_PIN1  5
+#define XSHUT_PIN2  6
+#define TOF_ADDR1   0x30
+#define TOF_ADDR2   0x31
 
-// ── TCA9548A Multiplexer ──────────────────────────────────────
-#define TCA_ADDR    0x70   // Default I2C address (A0=A1=A2=GND)
-#define CH_TOF1     0      // Channel 0: VL53L0X #1
-#define CH_TOF2     1      // Channel 1: VL53L0X #2
-#define CH_RGB1     2      // Channel 2: TCS34725 #1
-#define CH_RGB2     3      // Channel 3: TCS34725 #2
+// ── Wire1 (I2C1): RGB1 + RGB2 (pin switching) ─────────────────
+#define RGB1_SDA    35
+#define RGB1_SCL    36
+#define RGB2_SDA    12
+#define RGB2_SCL    13
 
-// ── Logic levels ─────────────────────────────────────────────
-#define RELAY_ON  LOW
-#define RELAY_OFF HIGH
+// ── LED pins ──────────────────────────────────────────────────
+#define LED_PIN1    40
+#define LED_PIN2    41
 
-// ── Sensor objects ───────────────────────────────────────────
-VL53L0X l0x1;
-VL53L0X l0x2;
-Adafruit_TCS34725 rgb1 = Adafruit_TCS34725(TCS34725_INTEGRATIONTIME_50MS, TCS34725_GAIN_4X);
-Adafruit_TCS34725 rgb2 = Adafruit_TCS34725(TCS34725_INTEGRATIONTIME_50MS, TCS34725_GAIN_4X);
+// ── Sensor objects ────────────────────────────────────────────
+VL53L0X tof1, tof2;
+Adafruit_TCS34725 rgb1(TCS34725_INTEGRATIONTIME_50MS, TCS34725_GAIN_4X);
+Adafruit_TCS34725 rgb2(TCS34725_INTEGRATIONTIME_50MS, TCS34725_GAIN_4X);
 
-// ─────────────────────────────────────────────────────────────
-// Select a channel on the TCA9548A (0-7)
-// Pass 255 to disable all channels
-// ─────────────────────────────────────────────────────────────
-void tcaSelect(uint8_t ch) {
-  Wire.beginTransmission(TCA_ADDR);
-  Wire.write(ch < 8 ? (1 << ch) : 0);
-  Wire.endTransmission();
-}
-
-// ─────────────────────────────────────────────────────────────
-// Scan each active multiplexer channel for I2C devices
-// ─────────────────────────────────────────────────────────────
-void check() {
-  Serial.println("[I2C] Scanning TCA9548A channels...");
-  for (uint8_t ch = 0; ch < 4; ch++) {
-    tcaSelect(ch);
-    Serial.print("[I2C] Channel "); Serial.print(ch); Serial.println(":");
-    for (byte addr = 8; addr < 120; addr++) {
-      Wire.beginTransmission(addr);
-      if (Wire.endTransmission() == 0) {
-        Serial.print("  Device at 0x");
-        Serial.println(addr, HEX);
-      }
+void scanBus(TwoWire& bus, const char* name) {
+  Serial.print("[I2C] "); Serial.println(name);
+  bool found = false;
+  for (byte a = 8; a < 120; a++) {
+    bus.beginTransmission(a);
+    if (bus.endTransmission() == 0) {
+      Serial.print("  0x"); Serial.println(a, HEX);
+      found = true;
     }
   }
-  tcaSelect(255);
-  Serial.println("[I2C] Scan complete");
+  if (!found) Serial.println("  (no devices)");
 }
 
-// ─────────────────────────────────────────────────────────────
-// Reinitialize a ToF sensor on its multiplexer channel
-// Called when a timeout or communication failure is detected
-// ─────────────────────────────────────────────────────────────
-void resetSensor(uint8_t channel, VL53L0X& sensor) {
-  Serial.println("[ToF] Resetting sensor...");
+void resetSensor(int xshut, uint8_t addr, VL53L0X& sensor) {
+  Serial.println("[ToF] Resetting...");
   sensor.stopContinuous();
-  tcaSelect(channel);
-  delay(50);
+  digitalWrite(xshut, LOW);
+  delay(20);
+  digitalWrite(xshut, HIGH);
+  delay(20);
   sensor.init();
+  sensor.setAddress(addr);
   sensor.setTimeout(500);
   sensor.startContinuous();
-  Serial.println("[ToF] Reset complete");
+  Serial.println("[ToF] Reset done");
 }
 
-// ─────────────────────────────────────────────────────────────
-// Read distance from a ToF sensor on a given channel
-// Returns true if an object is detected within 1000mm
-// ─────────────────────────────────────────────────────────────
-bool tof_sens(uint8_t channel, VL53L0X& sensor, const char* label) {
-  tcaSelect(channel);
-  uint16_t distance = sensor.readRangeContinuousMillimeters();
-
-  Serial.print("["); Serial.print(label); Serial.print("] Distance: ");
-  Serial.print(distance);
-  Serial.println(" mm");
-
-  return (distance < 1000);
+bool tof_sens(VL53L0X& sensor, const char* label) {
+  uint16_t dist = sensor.readRangeContinuousMillimeters();
+  Serial.print("["); Serial.print(label); Serial.print("] ");
+  Serial.print(dist); Serial.println(" mm");
+  return dist < 1000;
 }
 
-// ─────────────────────────────────────────────────────────────
-// Check whether the object on a given channel appears green
-// Returns true if the color ratios indicate a plant
-// ─────────────────────────────────────────────────────────────
-bool is_green(uint8_t channel, Adafruit_TCS34725& sensor, const char* label) {
-  tcaSelect(channel);
+// Wire1 pins are switched before reading each RGB sensor.
+// sensor.begin() is called each time because Wire1.end() can cause
+// a bus glitch that leaves the TCS34725 in a non-responsive state.
+bool is_green(Adafruit_TCS34725& sensor, int sda, int scl, const char* label) {
+  Wire1.end();
+  Wire1.begin(sda, scl);
+  sensor.begin(TCS34725_ADDRESS, &Wire1);
+
   uint16_t r, g, b, c;
   sensor.getRawData(&r, &g, &b, &c);
 
@@ -100,81 +77,85 @@ bool is_green(uint8_t channel, Adafruit_TCS34725& sensor, const char* label) {
   Serial.print(" C="); Serial.println(c);
 
   if (c == 0) {
-    Serial.print("["); Serial.print(label); Serial.println("] No light detected");
+    Serial.print("["); Serial.print(label); Serial.println("] No light");
     return false;
   }
 
-  float rRatio = (float)r / c * 100.0f;
-  float gRatio = (float)g / c * 100.0f;
-  float bRatio = (float)b / c * 100.0f;
+  float rR = (float)r / c * 100.0f;
+  float gR = (float)g / c * 100.0f;
+  float bR = (float)b / c * 100.0f;
 
-  Serial.print("["); Serial.print(label); Serial.print("] ");
-  Serial.print("rRatio="); Serial.print(rRatio);
-  Serial.print(" gRatio="); Serial.print(gRatio);
-  Serial.print(" bRatio="); Serial.println(bRatio);
-
-  bool result = (gRatio > rRatio * 1.2f) &&
-                (gRatio > bRatio * 1.1f) &&
-                (gRatio > 20.0f);
-
-  Serial.print("["); Serial.print(label); Serial.print("] Is green: ");
+  bool result = (gR > rR * 1.2f) && (gR > bR * 1.1f) && (gR > 20.0f);
+  Serial.print("["); Serial.print(label); Serial.print("] Green: ");
   Serial.println(result ? "YES" : "NO");
-
   return result;
-}
-
-void setRelay(bool shouldWater) {
-  digitalWrite(RELAY_PIN, shouldWater ? RELAY_ON : RELAY_OFF);
-  Serial.print("[Relay] ");
-  Serial.println(shouldWater ? "ON — watering" : "OFF");
 }
 
 void setup() {
   Serial.begin(115200);
-  delay(500);
-  Wire.begin(SDA_PIN, SCL_PIN);
+  delay(1000);
+  Serial.println("[Boot] Starting...");
 
-  pinMode(RELAY_PIN, OUTPUT);
-  digitalWrite(RELAY_PIN, RELAY_OFF);
+  pinMode(LED_PIN1,   OUTPUT); digitalWrite(LED_PIN1,   LOW);
+  pinMode(LED_PIN2,   OUTPUT); digitalWrite(LED_PIN2,   LOW);
+  pinMode(XSHUT_PIN1, OUTPUT); digitalWrite(XSHUT_PIN1, LOW);
+  pinMode(XSHUT_PIN2, OUTPUT); digitalWrite(XSHUT_PIN2, LOW);
+  delay(50);
 
-  // Init ToF1 on channel 0
-  tcaSelect(CH_TOF1);
+  Wire.begin(TOF_SDA, TOF_SCL);
+
+  // ── ToF1 ────────────────────────────────────────────────────
+  tof1.setBus(&Wire);
+  digitalWrite(XSHUT_PIN1, HIGH);
   delay(100);
-  if (!l0x1.init()) { Serial.println("[ToF1] FAILED"); while (1); }
-  l0x1.setTimeout(500);
-  l0x1.startContinuous();
-  Serial.println("[ToF1] OK");
+  if (!tof1.init()) { Serial.println("[ToF1] FAILED"); while (1); }
+  tof1.setAddress(TOF_ADDR1);
+  tof1.setTimeout(500);
+  tof1.startContinuous();
+  Serial.println("[ToF1] OK at 0x30");
 
-  // Init ToF2 on channel 1
-  tcaSelect(CH_TOF2);
+  // ── ToF2 ────────────────────────────────────────────────────
+  tof2.setBus(&Wire);
+  digitalWrite(XSHUT_PIN2, HIGH);
   delay(100);
-  if (!l0x2.init()) { Serial.println("[ToF2] FAILED"); while (1); }
-  l0x2.setTimeout(500);
-  l0x2.startContinuous();
-  Serial.println("[ToF2] OK");
+  if (!tof2.init()) { Serial.println("[ToF2] FAILED"); while (1); }
+  tof2.setAddress(TOF_ADDR2);
+  tof2.setTimeout(500);
+  tof2.startContinuous();
+  Serial.println("[ToF2] OK at 0x31");
 
-  // Init RGB1 on channel 2
-  tcaSelect(CH_RGB1);
-  if (!rgb1.begin()) { Serial.println("[RGB1] FAILED"); while (1); }
+  // ── RGB1 ────────────────────────────────────────────────────
+  Wire1.begin(RGB1_SDA, RGB1_SCL);
+  if (!rgb1.begin(TCS34725_ADDRESS, &Wire1)) {
+    Serial.println("[RGB1] FAILED"); while (1);
+  }
   Serial.println("[RGB1] OK");
 
-  // Init RGB2 on channel 3
-  tcaSelect(CH_RGB2);
-  if (!rgb2.begin()) { Serial.println("[RGB2] FAILED"); while (1); }
+  // ── RGB2 ────────────────────────────────────────────────────
+  Wire1.begin(RGB2_SDA, RGB2_SCL);
+  if (!rgb2.begin(TCS34725_ADDRESS, &Wire1)) {
+    Serial.println("[RGB2] FAILED"); while (1);
+  }
   Serial.println("[RGB2] OK");
 
-  check();
+  Serial.println("[Boot] Final scan:");
+  scanBus(Wire,  "Wire  (SDA:8,  SCL:9)");
+  Wire1.begin(RGB1_SDA, RGB1_SCL); scanBus(Wire1, "Wire1 (SDA:35, SCL:36) RGB1");
+  Wire1.begin(RGB2_SDA, RGB2_SCL); scanBus(Wire1, "Wire1 (SDA:12, SCL:13) RGB2");
 }
 
 void loop() {
-  bool detected1 = tof_sens(CH_TOF1, l0x1, "ToF1");
-  bool detected2 = tof_sens(CH_TOF2, l0x2, "ToF2");
+  bool det1 = tof_sens(tof1, "ToF1");
+  bool det2 = tof_sens(tof2, "ToF2");
 
-  // Read RGB only if the paired ToF detects an object
-  bool green1 = detected1 ? is_green(CH_RGB1, rgb1, "RGB1") : false;
-  bool green2 = detected2 ? is_green(CH_RGB2, rgb2, "RGB2") : false;
+  bool green1 = det1 ? is_green(rgb1, RGB1_SDA, RGB1_SCL, "RGB1") : false;
+  bool green2 = det2 ? is_green(rgb2, RGB2_SDA, RGB2_SCL, "RGB2") : false;
 
-  // Water if either pair confirms a green object
-  setRelay((detected1 && green1) || (detected2 && green2));
-  delay(200);
+  digitalWrite(LED_PIN1, (det1 && green1) ? HIGH : LOW);
+  digitalWrite(LED_PIN2, (det2 && green2) ? HIGH : LOW);
+
+  Serial.print("[LED1] "); Serial.println((det1 && green1) ? "ON" : "OFF");
+  Serial.print("[LED2] "); Serial.println((det2 && green2) ? "ON" : "OFF");
+
+  delay(100);
 }
