@@ -84,13 +84,3 @@ Install via **Arduino Library Manager**:
 2. Select board: **ESP32S3 Dev Module**
 3. Upload speed: **115200**
 4. Flash and open Serial Monitor to see the AP IP address
-
----
-
-## File Structure
-
-```
-Arduino_VL53L0X_TCS34725/
-├── Arduino_VL53L0X_TCS34725.ino   # Main sketch
-└── README.md
-```
