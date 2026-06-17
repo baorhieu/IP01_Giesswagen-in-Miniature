@@ -2,8 +2,8 @@
 // Gießwagen Sensors Board — main.cpp
 // Converted from Arduino_VL53L0X_TCS34725.ino for PlatformIO
 // ─────────────────────────────────────────────────────────────
-#include <Arduino.h>              // ← Required in PlatformIO (auto-included in Arduino IDE)
-#include "config.h"               // ← Pin definitions and constants
+#include <Arduino.h>              
+#include "config.h"               
 
 #include <Wire.h>
 #include <VL53L0X.h>
@@ -20,6 +20,17 @@ WebSocketsServer webSocket(81);
 VL53L0X          tof1, tof2;
 Adafruit_TCS34725 rgb1(TCS34725_INTEGRATIONTIME_50MS, TCS34725_GAIN_4X);
 Adafruit_TCS34725 rgb2(TCS34725_INTEGRATIONTIME_50MS, TCS34725_GAIN_4X);
+
+// ── CSV data buffer (stored in RAM) ──────────────────────────
+const char* CSV_HEADER = "timestamp_ms;tof1_mm;tof1_detected;rgb1_r;rgb1_g;rgb1_b;rgb1_green;led1;tof2_mm;tof2_detected;rgb2_r;rgb2_g;rgb2_b;rgb2_green;led2\n";
+String csvBuffer = CSV_HEADER;
+const size_t CSV_MAX_SIZE = 200000;  // ~200KB cap to avoid RAM overflow
+
+// ── RGB read result ──────────────────────────────────────────
+struct RGBResult {
+  uint16_t r, g, b, c;
+  bool isGreen;
+};
 
 // ── HTML page ─────────────────────────────────────────────────
 const char* htmlPage = R"rawliteral(
@@ -38,9 +49,21 @@ const char* htmlPage = R"rawliteral(
              padding:12px; font-family:inherit; font-size:14px;
              box-sizing:border-box; }
     #status { color:#888; font-size:12px; margin-bottom:8px; }
+    #toolbar { position:fixed; top:0; left:0; right:0; background:#111;
+               padding:8px; border-bottom:1px solid #0f0; z-index:10; }
+    .btn { background:#0f0; color:#000; border:none; padding:8px 16px;
+           margin-right:8px; font-family:inherit; font-size:13px;
+           font-weight:bold; cursor:pointer; border-radius:4px; }
+    .btn:active { background:#0a0; }
+    .btn.clear { background:#f44; color:#fff; }
+    #log { margin-top:50px; }
   </style>
 </head>
 <body>
+  <div id="toolbar">
+    <button class="btn" onclick="window.location='/download'">⬇ Download CSV</button>
+    <button class="btn clear" onclick="clearLog()">🗑 Clear Data</button>
+  </div>
   <div id="status">Connecting...</div>
   <div id="log"></div>
   <input id="input" placeholder="Enter command..." autocomplete="off" autocapitalize="off">
@@ -65,6 +88,14 @@ const char* htmlPage = R"rawliteral(
       };
     }
     connect();
+    function clearLog() {
+      if (confirm('Clear all CSV data on the device?')) {
+        fetch('/clear').then(r => r.text()).then(t => {
+          log.textContent = '';
+          status.textContent = t;
+        });
+      }
+    }
     input.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && input.value.trim()) {
         ws.send(input.value.trim());
@@ -135,27 +166,49 @@ bool tof_sens(VL53L0X& sensor, const char* label) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Read RGB sensor and return true if object is green
+// Read RGB sensor — returns full color data + green verdict
 // Wire1 pins are switched before each read (pin-switching method)
 // ─────────────────────────────────────────────────────────────
-bool is_green(Adafruit_TCS34725& sensor, int sda, int scl, const char* label) {
+RGBResult read_rgb(Adafruit_TCS34725& sensor, int sda, int scl, const char* label) {
   Wire1.end();
   Wire1.begin(sda, scl);
   sensor.begin(TCS34725_ADDRESS, &Wire1);
 
-  uint16_t r, g, b, c;
-  sensor.getRawData(&r, &g, &b, &c);
+  RGBResult res;
+  sensor.getRawData(&res.r, &res.g, &res.b, &res.c);
 
-  wsPrintln(String("[") + label + "] R=" + r + " G=" + g + " B=" + b + " C=" + c);
+  wsPrintln(String("[") + label + "] R=" + res.r + " G=" + res.g + " B=" + res.b + " C=" + res.c);
 
-  if (c == 0) {
+  if (res.c == 0) {
     wsPrintln(String("[") + label + "] No light");
-    return false;
+    res.isGreen = false;
+    return res;
   }
 
-  bool result = (r > 100) && (b > 70) && (g > 90);
-  wsPrintln(String("[") + label + "] Green: " + (result ? "YES" : "NO"));
-  return result;
+  res.isGreen = (res.r > 100) && (res.b > 70) && (res.g > 90);
+  wsPrintln(String("[") + label + "] Green: " + (res.isGreen ? "YES" : "NO"));
+  return res;
+}
+
+// ─────────────────────────────────────────────────────────────
+// Append one data row to the CSV buffer
+// ─────────────────────────────────────────────────────────────
+void logCSV(uint16_t d1, bool det1, RGBResult rgb1Data, bool led1,
+            uint16_t d2, bool det2, RGBResult rgb2Data, bool led2) {
+  
+    String row = String(millis()) + ";" +
+                 d1 + ";" + det1 + ";" +
+                 rgb1Data.r + ";" + rgb1Data.g + ";" + rgb1Data.b + ";" + rgb1Data.isGreen + ";" + led1 + ";" +
+                 d2 + ";" + det2 + ";" +
+                 rgb2Data.r + ";" + rgb2Data.g + ";" + rgb2Data.b + ";" + rgb2Data.isGreen + ";" + led2 + "\n";  
+
+    // Avoid RAM overflow — drop oldest rows (keep header) if too large
+    if (csvBuffer.length() + row.length() > CSV_MAX_SIZE) {
+      int headerEnd = csvBuffer.indexOf('\n') + 1;
+      int cut = csvBuffer.indexOf('\n', csvBuffer.length() / 2);
+      csvBuffer = csvBuffer.substring(0, headerEnd) + csvBuffer.substring(cut + 1);
+   }
+    csvBuffer += row;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -176,6 +229,19 @@ void setup() {
   Serial.println("==========================");
 
   server.on("/", []() { server.send(200, "text/html", htmlPage); });
+
+  // Download the CSV log file
+  server.on("/download", []() {
+    server.sendHeader("Content-Disposition", "attachment; filename=giesswagen_log.csv");
+    server.send(200, "text/csv", csvBuffer);
+  });
+
+  // Clear all CSV data (reset to header only)
+  server.on("/clear", []() {
+    csvBuffer = CSV_HEADER;
+    server.send(200, "text/plain", "CSV cleared");
+  });
+
   server.begin();
   webSocket.begin();
   webSocket.onEvent(webSocketEvent);
@@ -243,32 +309,42 @@ void loop() {
   if (millis() - lastRead < SENSOR_READ_INTERVAL_MS) return;
   lastRead = millis();
 
-  // Read ToF distance sensors
-  bool det1 = tof_sens(tof1, "ToF1");
-  bool det2 = tof_sens(tof2, "ToF2");
+  // Read ToF distance sensors (capture distance for CSV)
+  uint16_t d1 = tof1.readRangeContinuousMillimeters();
+  uint16_t d2 = tof2.readRangeContinuousMillimeters();
+  bool det1 = d1 < DETECT_DISTANCE_MM;
+  bool det2 = d2 < DETECT_DISTANCE_MM;
+  wsPrintln(String("[ToF1] ") + d1 + " mm");
+  wsPrintln(String("[ToF2] ") + d2 + " mm");
 
   // Read RGB color sensors — only if object detected by ToF
-  bool green1 = false;
-  bool green2 = false;
+  RGBResult rgb1Data = {0, 0, 0, 0, false};
+  RGBResult rgb2Data = {0, 0, 0, 0, false};
 
   if (det1) {
-    green1 = is_green(rgb1, RGB1_SDA, RGB1_SCL, "RGB1");
+    rgb1Data = read_rgb(rgb1, RGB1_SDA, RGB1_SCL, "RGB1");
   } else {
     wsPrintln("[RGB1] Skipped");
   }
 
   if (det2) {
-    green2 = is_green(rgb2, RGB2_SDA, RGB2_SCL, "RGB2");
+    rgb2Data = read_rgb(rgb2, RGB2_SDA, RGB2_SCL, "RGB2");
   } else {
     wsPrintln("[RGB2] Skipped");
   }
 
   // LED ON only if object detected AND confirmed green
-  bool led1 = det1 && green1;
-  bool led2 = det2 && green2;
+  bool led1 = det1 && rgb1Data.isGreen;
+  bool led2 = det2 && rgb2Data.isGreen;
 
   digitalWrite(LED_PIN1, led1 ? HIGH : LOW);
   digitalWrite(LED_PIN2, led2 ? HIGH : LOW);
+
+  // Log this reading to the CSV buffer
+  while (det1 || det2){
+    logCSV(d1, det1, rgb1Data, led1, d2, det2, rgb2Data, led2);
+    break;
+  }
 
   wsPrintln(String("[LED1] ") + (led1 ? "ON" : "OFF") +
             "  [LED2] "       + (led2 ? "ON" : "OFF"));
