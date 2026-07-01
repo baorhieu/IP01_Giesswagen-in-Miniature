@@ -4,6 +4,8 @@
 
 A miniature "watering cart" (Gießwagen) prototype that autonomously detects plants using dual **Time-of-Flight (ToF)** distance sensors and **RGB color** sensors, then signals detection via onboard LEDs. Live sensor data streams to any browser over WiFi — no router or app install required.
 
+Built with **PlatformIO** on the ESP32-S3.
+
 ---
 
 ## Table of Contents
@@ -63,6 +65,8 @@ All readings are also broadcast live to a browser-based terminal for debugging a
 | LED 1 | — | 40 |
 | LED 2 | — | 41 |
 
+> Pin assignments are defined in [`include/config.h`](include/config.h).
+
 ### I²C Bus Layout
 
 ```
@@ -73,9 +77,9 @@ Wire1 (I2C1, GPIO 12/13) : RGB2 (0x29) ┘ so pins are switched before each read
 
 > **Why two I²C buses?** The VL53L0X sensors share a bus (I2C0) and use their `XSHUT` pins at boot to get unique addresses (`0x30` / `0x31`). The TCS34725 sensors have a fixed, non-configurable address (`0x29`), so instead they're each wired to a dedicated SDA/SCL pair on I2C1, and the firmware switches between them at runtime.
 
-### Required Libraries
+### Dependencies
 
-Install via **Arduino Library Manager**:
+Libraries are managed automatically by PlatformIO via `lib_deps` in [`platformio.ini`](platformio.ini):
 
 | Library | Author |
 |---|---|
@@ -99,15 +103,24 @@ Each sensor pair operates independently, allowing the cart to monitor two zones 
 
 ## Getting Started
 
+This is a **PlatformIO** project. You'll need [VS Code](https://code.visualstudio.com/) with the [PlatformIO IDE extension](https://platformio.org/install/ide?install=vscode) installed.
+
 1. Clone this repository:
    ```bash
    git clone https://github.com/baorhieu/IP01_Giesswagen-in-Miniature.git
+   cd IP01_Giesswagen-in-Miniature
    ```
-2. Open `Arduino_VL53L0X_TCS34725.ino` in the **Arduino IDE**.
-3. Install the required libraries listed above.
-4. Select board: **ESP32S3 Dev Module**.
-5. Set upload speed to **115200**.
-6. Flash the firmware, then open the Serial Monitor to confirm the Access Point's IP address.
+2. Open the folder in **VS Code** — PlatformIO will auto-detect the project and install the dependencies listed in `platformio.ini`.
+3. Connect the ESP32-S3 via USB.
+4. Build and upload:
+   ```bash
+   pio run --target upload
+   ```
+   (or use the PlatformIO **Upload** button in the status bar).
+5. Open the serial monitor to confirm the Access Point's IP address:
+   ```bash
+   pio device monitor
+   ```
 
 ---
 
@@ -120,14 +133,30 @@ Each sensor pair operates independently, allowing the cart to monitor two zones 
 3. Open a browser and navigate to **`http://192.168.4.1`**.
 4. Watch live sensor readings and detection events stream in.
 
+![WiFi terminal screenshot](docs/terminal.png)
+
 ---
 
 ## Project Structure
 
 ```
 IP01_Giesswagen-in-Miniature/
-├── Arduino_VL53L0X_TCS34725.ino   # Main firmware sketch
-└── README.md                      # This file
+├── .vscode/
+│   └── extensions.json        # Recommended VS Code extensions
+├── docs/
+│   └── terminal.png           # WiFi terminal screenshot
+├── include/
+│   ├── README
+│   └── config.h               # Pin definitions & configuration
+├── lib/
+│   └── README                 # Local/private libraries (optional)
+├── src/
+│   └── main.cpp               # Main firmware source
+├── test/
+│   └── README                 # Unit tests (optional)
+├── .gitignore
+├── platformio.ini             # PlatformIO project configuration
+└── README.md
 ```
 
 ---
